@@ -401,14 +401,8 @@ class TapeyTape:
         return bar
 
     def _get_steno(self, stroke):
-        keys = set()
-        for key in stroke.steno_keys:
-            if key in self.numbers:                # e.g., if key is 1-
-                keys.add(self.numbers[key])        #   add the corresponding S-
-                keys.add(plover.system.NUMBER_KEY) #   and #
-            else:                                  # if key is S-
-                keys.add(key)                      #   add S-
-        steno = ''.join(key.strip('-') if key in keys else ' ' for key in plover.system.KEYS)
+        StenoKeys = IntFlag("StenoKeys", plover.system.KEYS)
+        steno = ''.join(key.strip('-') if StenoKeys[key] in StenoKeys(int(stroke)) else ' ' for key in plover.system.KEYS)
         return steno
 
     def _get_dictionary_name(self, translations):
