@@ -233,9 +233,10 @@ class TapeyTape:
         if self.was_fingerspelling:
             self.update_row()
 
+        self.live.stop()
+
         self.engine.hook_disconnect('stroked', self.on_stroked)
         
-        self.live.stop()
     
     def update_row(self):
         self.table.rows[-1].style="strike" # TODO actually delete
@@ -311,25 +312,12 @@ class TapeyTape:
         now  = datetime.datetime.now()
         time = now.isoformat(sep=' ', timespec='milliseconds')
 
-        if self.last_stroke_time is None:
-            bar = ' ' * self.config['bar_max_width']
-        else:
-            seconds = max((now - self.last_stroke_time).total_seconds() - self.config['bar_threshold'], 0)
-            width   = min(int(seconds / self.config['bar_time_unit']), self.config['bar_max_width'])
-            justify = str.ljust if self.config['bar_alignment'] == 'left' else str.rjust
-            bar     = justify(self.config['bar_character'] * width, self.config['bar_max_width'])
+        bar = self._get_bar()
 
         self.last_stroke_time = now
 
         # Steno
-        keys = set()
-        for key in stroke.steno_keys:
-            if key in self.numbers:                # e.g., if key is 1-
-                keys.add(self.numbers[key])        #   add the corresponding S-
-                keys.add(plover.system.NUMBER_KEY) #   and #
-            else:                                  # if key is S-
-                keys.add(key)                      #   add S-
-        steno = ''.join(key.strip('-') if key in keys else ' ' for key in plover.system.KEYS)
+        steno = self._get_steno(stroke)
         raw_steno = stroke.rtfcre
 
         # At this point we start to deal with things for which we need to
@@ -380,31 +368,10 @@ class TapeyTape:
             translated = star + retroformat(translations[-1]).translate(SHOW_WHITESPACE)
 
             # Dictionary name
-            for dictionary in self.engine.dictionaries.dicts:
-                if translations[-1].rtfcre in dictionary:
-                    dictionary_name = self.dictionary_names.get(dictionary.path, '')
-                    break
-            else:
-                dictionary_name = ''
+            dictionary_name = self._get_dictionary_name(translations)
 
             # Suggestions
-            chunks = []
-            seen_suggestion_keys = set()
-            for i, tail in enumerate(itertools.islice(tails(translations), 10), 1):
-                outlines = []
-                total_strokes = sum(len(translation.rtfcre) for translation in tail)
-                for suggestion_key in suggestion_keys(tail):
-                    if suggestion_key not in seen_suggestion_keys:
-                        seen_suggestion_keys.add(suggestion_key)
-                        for outline in self.engine.dictionaries.reverse_lookup(suggestion_key):
-                            if len(outline) < total_strokes:
-                                outlines.append(outline)
-                if outlines:
-                    prefix = '' if i == 1 else str(i)
-                    chunks.append(prefix
-                                  + self.config['suggestions_marker']
-                                  + ' '.join(map('/'.join, sorted(outlines, key=len))))
-            suggestions = ' '.join(chunks)
+            suggestions = self._get_suggestions(translations)
 
             self.was_fingerspelling = is_fingerspelling(translations[-1])
 
@@ -421,3 +388,54 @@ class TapeyTape:
         self.new_row(omit_suggestions=self.was_fingerspelling)
 
         self.live.update(self.table, refresh=True)
+
+    def _get_bar(self):
+        if self.last_stroke_time is None:
+            bar = ' ' * self.config['bar_max_width']
+        else:
+            ms_since_last_stroke = datetime.datetime.now() - self.last_stroke_time
+            seconds = max((ms_since_last_stroke).total_seconds() - self.config['bar_threshold'], 0)
+            width   = min(int(seconds / self.config['bar_time_unit']), self.config['bar_max_width'])
+            justify = str.ljust if self.config['bar_alignment'] == 'left' else str.rjust
+            bar     = justify(self.config['bar_character'] * width, self.config['bar_max_width'])
+        return bar
+
+    def _get_steno(self, stroke):
+        keys = set()
+        for key in stroke.steno_keys:
+            if key in self.numbers:                # e.g., if key is 1-
+                keys.add(self.numbers[key])        #   add the corresponding S-
+                keys.add(plover.system.NUMBER_KEY) #   and #
+            else:                                  # if key is S-
+                keys.add(key)                      #   add S-
+        steno = ''.join(key.strip('-') if key in keys else ' ' for key in plover.system.KEYS)
+        return steno
+
+    def _get_dictionary_name(self, translations):
+        for dictionary in self.engine.dictionaries.dicts:
+            if translations[-1].rtfcre in dictionary:
+                dictionary_name = self.dictionary_names.get(dictionary.path, '')
+                break
+        else:
+            dictionary_name = ''
+        return dictionary_name
+
+    def _get_suggestions(self, translations):
+        chunks = []
+        seen_suggestion_keys = set()
+        for i, tail in enumerate(itertools.islice(tails(translations), 10), 1):
+            outlines = []
+            total_strokes = sum(len(translation.rtfcre) for translation in tail)
+            for suggestion_key in suggestion_keys(tail):
+                if suggestion_key not in seen_suggestion_keys:
+                    seen_suggestion_keys.add(suggestion_key)
+                    for outline in self.engine.dictionaries.reverse_lookup(suggestion_key):
+                        if len(outline) < total_strokes:
+                            outlines.append(outline)
+            if outlines:
+                prefix = '' if i == 1 else str(i)
+                chunks.append(prefix
+                                  + self.config['suggestions_marker']
+                                  + ' '.join(map('/'.join, sorted(outlines, key=len))))
+        suggestions = ' '.join(chunks)
+        return suggestions
