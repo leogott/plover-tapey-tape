@@ -7,20 +7,36 @@
 #     `-------'
 
 import collections
+from dataclasses import dataclass
 import datetime
 import itertools
 import json
 import pathlib
 import re
+from typing import Optional
 
-import rich.console
-import rich.table
+from rich.console import Console
+from rich.live import Live
+from rich.table import Table
+from rich import box
 
 import plover
 
 CONFIG_DIR = pathlib.Path(plover.oslayer.config.CONFIG_DIR)
 
 SHOW_WHITESPACE = str.maketrans({'\n': '\\n', '\r': '\\r', '\t': '\\t'})
+
+@dataclass
+class StrokeData:
+    """Class for keeping track of the entries in a new row."""
+    time: str
+    bar: str
+    steno: str
+    raw_steno: str
+    defined: str
+    translated: str = Optional[str]
+    dictionary_name: str = Optional[str]
+    suggestions: str = Optional[str]
 
 def make_absolute(filename):
     path = pathlib.Path(filename).expanduser()
@@ -137,11 +153,11 @@ def retroformat(translation):
     return output
 
 def expand(format_string, items):
-    def replace(matchobj):
-        width, letter = matchobj.groups()
-        width = 0 if not width else int(width)
-        return items.get(letter, '').ljust(width)
-    return re.sub(r'%(\d*)(.)', replace, format_string)
+    cols = []
+    for match in re.finditer(r'%(\d*)(.)', format_string):
+        _width, letter = match.groups()
+        cols.append(items.get(letter, ''))
+    return cols
 
 class ConfigError(Exception):
     pass
@@ -151,6 +167,7 @@ class TapeyTape:
         self.engine = engine
         self.last_stroke_time = None
         self.was_fingerspelling = False
+        self.last_stroke_data = None
 
     def start(self):
         try:
@@ -187,11 +204,21 @@ class TapeyTape:
             self.config[option] = value
 
         try:
-            self.file = make_absolute(self.config['output_file']).open('a', encoding='utf-8')
+            tape_file = make_absolute(self.config['output_file']).open('a', encoding='utf-8')
+            # self.console = Console(file=tape_file)
+            self.console = Console()
+            self.table = Table("Bar", "Steno", "Defined", "Suggestions", title="Tapey Tape", box=box.MINIMAL)
+            self.data_keys = ["b", "S", "D", "s"]
+            self.console.clear()
+            self.console.print("debug baby!")
+            self.live = Live(self.table, console=self.console, vertical_overflow="visible", transient=True, auto_refresh=False)
+            self.live.start()
+            self.table.add_row("", "asdflk", "")
         except OSError:
             raise ConfigError('output_file could not be opened')
 
         self.left_format, *rest = re.split(r'(\s*%s)', self.config['line_format'], maxsplit=1)
+        self.left_format_dummy = [None for _ in range(self.left_format.count("|") + 1)]
         self.right_format = ''.join(rest)
 
         self.dictionary_names = {str(make_absolute(filename)): name
@@ -204,12 +231,22 @@ class TapeyTape:
 
     def stop(self):
         if self.was_fingerspelling:
-            self.file.write(expand(self.right_format, self.items).rstrip())
-            self.file.write('\n')
+            self.update_row()
 
         self.engine.hook_disconnect('stroked', self.on_stroked)
-
-        self.file.close()
+        
+        self.live.stop()
+    
+    def update_row(self):
+        self.table.rows[-1].style="strike" # TODO actually delete
+        self.new_row()
+    
+    def new_row(self, omit_suggestions: bool = False):
+        data = self.items.copy()
+        if omit_suggestions:
+            data["suggestions"] = ""
+        
+        self.table.add_row(*(data[key] for key in self.data_keys))
 
     def on_stroked(self, stroke):
         # Do nothing if typing in QWERTY while Plover is off
@@ -265,10 +302,10 @@ class TapeyTape:
                     or is_fingerspelling(translations[-1])
                     or stroke.is_correction
                     or translations[-1].replaced):
-                self.items['s'] = '' # suppress suggestions
-
-            self.file.write(expand(self.right_format, self.items).rstrip())
-            self.file.write('\n')
+                # self.items['s'] = '' # suppress suggestions
+                pass
+            else:
+                self.update_row()
 
         # Bar
         now  = datetime.datetime.now()
@@ -317,6 +354,7 @@ class TapeyTape:
             dictionary_name = ''
             suggestions     = ''
             self.was_fingerspelling = False
+            self.table.rows[-1].style = "red"
         else:
             # We can now rest assured that the translation stack is non-empty.
 
@@ -380,10 +418,6 @@ class TapeyTape:
                       's': suggestions,
                       '%': '%'}
 
-        self.file.write(expand(self.left_format, self.items))
+        self.new_row(omit_suggestions=self.was_fingerspelling)
 
-        if not self.was_fingerspelling:
-            self.file.write(expand(self.right_format, self.items).rstrip())
-            self.file.write('\n')
-
-        self.file.flush()
+        self.live.update(self.table, refresh=True)
