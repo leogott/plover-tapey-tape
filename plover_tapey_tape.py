@@ -13,6 +13,9 @@ import json
 import pathlib
 import re
 
+import rich.console
+import rich.table
+
 import plover
 
 CONFIG_DIR = pathlib.Path(plover.oslayer.config.CONFIG_DIR)
