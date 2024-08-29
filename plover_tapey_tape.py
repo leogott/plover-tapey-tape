@@ -9,10 +9,10 @@
 import collections
 from dataclasses import dataclass
 import datetime
+from enum import IntFlag
 import itertools
 import json
 import pathlib
-import re
 from typing import Optional
 
 from rich.console import Console
@@ -25,6 +25,10 @@ import plover
 CONFIG_DIR = pathlib.Path(plover.oslayer.config.CONFIG_DIR)
 
 SHOW_WHITESPACE = str.maketrans({'\n': '\\n', '\r': '\\r', '\t': '\\t'})
+
+class StenoKeysMixin:
+    def __str__(self):
+        return ''.join(key.name.strip('-') if key in self else ' ' for key in StenoKeys)
 
 @dataclass
 class StrokeData:
@@ -152,15 +156,43 @@ def retroformat(translation):
         last_action = action
     return output
 
-def expand(format_string, items):
-    cols = []
-    for match in re.finditer(r'%(\d*)(.)', format_string):
-        _width, letter = match.groups()
-        cols.append(items.get(letter, ''))
-    return cols
-
 class ConfigError(Exception):
     pass
+
+def _parse_config():
+    try:
+        with (CONFIG_DIR / 'tapey_tape.json').open(encoding='utf-8') as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        config = {}
+    else:
+        if not isinstance(config, dict):
+            raise ConfigError('Settings must be a JSON object')
+
+    options = (
+        ('output_file', str, lambda x: True, 'a string', 'tapey_tape.txt'),
+        ('line_format', str, lambda x: True, 'a string', '%b |%S| %D  %s'),
+        ('bar_character', str, lambda x: len(x) == 1, 'a 1-character string', '+'),
+        ('bar_max_width', int, lambda x: True, 'an integer', 5),
+        ('bar_time_unit', float, lambda x: x > 0, 'a positive number', 0.2),
+        ('bar_threshold', float, lambda x: True, 'a number', 0.0),
+        ('bar_alignment', str, lambda x: x in ('left', 'right'), 'either "left" or "right"', 'right'),
+        ('suggestions_marker', str, lambda x: True, 'a string', '>'),
+        ('dictionary_names', dict, lambda x: all(isinstance(k, str) and isinstance(v, str) for k, v in x.items()),
+            'a JSON object mapping strings to strings', {}),
+    )
+
+    config = {}
+    for option, type_, condition, description, default in options:
+        try:
+            value = config[option]
+        except KeyError:
+            value = default
+        else:
+            if not (isinstance(value, type_) and condition(value)):
+                raise ConfigError(f'{option} must be {description}')
+        config[option] = value
+    return config
 
 class TapeyTape:
     def __init__(self, engine):
@@ -170,56 +202,22 @@ class TapeyTape:
         self.last_stroke_data = None
 
     def start(self):
-        try:
-            with (CONFIG_DIR / 'tapey_tape.json').open(encoding='utf-8') as f:
-                config = json.load(f)
-        except FileNotFoundError:
-            config = {}
-        else:
-            if not isinstance(config, dict):
-                raise ConfigError('Settings must be a JSON object')
-
-        options = (
-            ('output_file', str, lambda x: True, 'a string', 'tapey_tape.txt'),
-            ('line_format', str, lambda x: True, 'a string', '%b |%S| %D  %s'),
-            ('bar_character', str, lambda x: len(x) == 1, 'a 1-character string', '+'),
-            ('bar_max_width', int, lambda x: True, 'an integer', 5),
-            ('bar_time_unit', float, lambda x: x > 0, 'a positive number', 0.2),
-            ('bar_threshold', float, lambda x: True, 'a number', 0.0),
-            ('bar_alignment', str, lambda x: x in ('left', 'right'), 'either "left" or "right"', 'right'),
-            ('suggestions_marker', str, lambda x: True, 'a string', '>'),
-            ('dictionary_names', dict, lambda x: all(isinstance(k, str) and isinstance(v, str) for k, v in x.items()),
-             'a JSON object mapping strings to strings', {}),
-        )
-
-        self.config = {}
-        for option, type_, condition, description, default in options:
-            try:
-                value = config[option]
-            except KeyError:
-                value = default
-            else:
-                if not (isinstance(value, type_) and condition(value)):
-                    raise ConfigError(f'{option} must be {description}')
-            self.config[option] = value
+        self.config = _parse_config()
+        global StenoKeys
+        StenoKeys = IntFlag("StenoKeys", plover.system.KEYS, type=StenoKeysMixin)
+        # StenoKeys.__str__ = lambda sel: ''.join(key.name.strip('-') if key in sel else ' ' for key in StenoKeys)
 
         try:
             tape_file = make_absolute(self.config['output_file']).open('a', encoding='utf-8')
-            # self.console = Console(file=tape_file)
-            self.console = Console()
-            self.table = Table("Bar", "Steno", "Defined", "Suggestions", title="Tapey Tape", box=box.MINIMAL)
-            self.data_keys = ["b", "S", "D", "s"]
-            self.console.clear()
-            self.console.print("debug baby!")
-            self.live = Live(self.table, console=self.console, vertical_overflow="visible", transient=True, auto_refresh=False)
-            self.live.start()
-            self.table.add_row("", "asdflk", "")
         except OSError:
             raise ConfigError('output_file could not be opened')
+        # self.console = Console(file=tape_file)
+        self.console = Console()
+        self.table = Table("Bar", "Steno", "Defined", "Suggestions", title="Tapey Tape", box=box.MINIMAL)
+        self.data_keys = ["b", "S", "D", "s"] # TODO parse self.config['line_format']
 
-        self.left_format, *rest = re.split(r'(\s*%s)', self.config['line_format'], maxsplit=1)
-        self.left_format_dummy = [None for _ in range(self.left_format.count("|") + 1)]
-        self.right_format = ''.join(rest)
+        self.live = Live(self.table, console=self.console, vertical_overflow="visible", transient=True, auto_refresh=False)
+        self.live.start(refresh=True)
 
         self.dictionary_names = {str(make_absolute(filename)): name
                                  for filename, name in self.config['dictionary_names'].items()}
@@ -236,17 +234,16 @@ class TapeyTape:
         self.live.stop()
 
         self.engine.hook_disconnect('stroked', self.on_stroked)
-        
-    
+
     def update_row(self):
         self.table.rows[-1].style="strike" # TODO actually delete
         self.new_row()
-    
+
     def new_row(self, omit_suggestions: bool = False):
         data = self.items.copy()
         if omit_suggestions:
             data["suggestions"] = ""
-        
+
         self.table.add_row(*(data[key] for key in self.data_keys))
 
     def on_stroked(self, stroke):
@@ -311,9 +308,8 @@ class TapeyTape:
         # Bar
         now  = datetime.datetime.now()
         time = now.isoformat(sep=' ', timespec='milliseconds')
-
-        bar = self._get_bar()
-
+        td_last_stroke = datetime.timedelta(0) if (self.last_stroke_time is None) else (now - self.last_stroke_time)
+        bar = self._get_bar(td_last_stroke, self.config)
         self.last_stroke_time = now
 
         # Steno
@@ -342,7 +338,7 @@ class TapeyTape:
             dictionary_name = ''
             suggestions     = ''
             self.was_fingerspelling = False
-            self.table.rows[-1].style = "red"
+            # self.table.rows[-1].style = "red"
         else:
             # We can now rest assured that the translation stack is non-empty.
 
@@ -366,11 +362,7 @@ class TapeyTape:
             # TODO: don't show numbers as untranslate
 
             translated = star + retroformat(translations[-1]).translate(SHOW_WHITESPACE)
-
-            # Dictionary name
             dictionary_name = self._get_dictionary_name(translations)
-
-            # Suggestions
             suggestions = self._get_suggestions(translations)
 
             self.was_fingerspelling = is_fingerspelling(translations[-1])
@@ -389,30 +381,23 @@ class TapeyTape:
 
         self.live.update(self.table, refresh=True)
 
-    def _get_bar(self):
-        if self.last_stroke_time is None:
-            bar = ' ' * self.config['bar_max_width']
-        else:
-            ms_since_last_stroke = datetime.datetime.now() - self.last_stroke_time
-            seconds = max((ms_since_last_stroke).total_seconds() - self.config['bar_threshold'], 0)
-            width   = min(int(seconds / self.config['bar_time_unit']), self.config['bar_max_width'])
-            justify = str.ljust if self.config['bar_alignment'] == 'left' else str.rjust
-            bar     = justify(self.config['bar_character'] * width, self.config['bar_max_width'])
+    @staticmethod
+    def _get_bar(td_last_stroke, config):
+        seconds = max((td_last_stroke).total_seconds() - config['bar_threshold'], 0)
+        width   = min(int(seconds / config['bar_time_unit']), config['bar_max_width'])
+        justify = str.ljust if config['bar_alignment'] == 'left' else str.rjust
+        bar     = justify(config['bar_character'] * width, config['bar_max_width'])
         return bar
 
-    def _get_steno(self, stroke):
-        StenoKeys = IntFlag("StenoKeys", plover.system.KEYS)
-        steno = ''.join(key.strip('-') if StenoKeys[key] in StenoKeys(int(stroke)) else ' ' for key in plover.system.KEYS)
-        return steno
+    @staticmethod
+    def _get_steno(stroke):
+        return str(StenoKeys(int(stroke)))
 
     def _get_dictionary_name(self, translations):
         for dictionary in self.engine.dictionaries.dicts:
             if translations[-1].rtfcre in dictionary:
-                dictionary_name = self.dictionary_names.get(dictionary.path, '')
-                break
-        else:
-            dictionary_name = ''
-        return dictionary_name
+                return self.dictionary_names.get(dictionary.path, '')
+        return ''
 
     def _get_suggestions(self, translations):
         chunks = []
